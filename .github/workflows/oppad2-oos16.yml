@@ -1,4 +1,3 @@
-
 name: OP Pad 2 - OEM source audit
 
 on:
@@ -37,7 +36,6 @@ jobs:
           set -euo pipefail
           mkdir -p oem
           cd oem
-
           repo init \
             -u https://github.com/OnePlusOSS/kernel_manifest \
             -b oneplus/sm8650 \
@@ -54,7 +52,6 @@ jobs:
         working-directory: oem
         run: |
           set -euo pipefail
-
           repo manifest -r -o source-lock.xml
 
           repo forall -c \
@@ -72,7 +69,7 @@ jobs:
 
           echo "Source revisions recorded."
 
-      - name: Save audit files
+      - name: Save source audit files
         uses: actions/upload-artifact@v4
         with:
           name: oppad2-oos16-source-audit
@@ -82,5 +79,78 @@ jobs:
             oem/manifest-commit.txt
             oem/build-script-paths.txt
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Collect kernel build diagnostics
+        working-directory: oem
+        run: |
+          set -euo pipefail
+          mkdir -p audit
+
+          SCRIPT="kernel_platform/oplus/build/oplus_build_kernel.sh"
+
+          if [ -f "$SCRIPT" ]; then
+            cp "$SCRIPT" audit/oplus_build_kernel.sh
+            printf 'Found build script at: %s\n' "$SCRIPT" \
+              > audit/build-script-status.txt
+            grep -nE \
+              'pineapple|gki|DEFCONFIG|BUILD_CONFIG|KERNEL|ARCH=|LLVM|LTO|CLANG|SUFFIX|PATCH' \
+              "$SCRIPT" > audit/build-script-key-lines.txt || true
+          else
+            printf 'Expected script not found at: %s\n' "$SCRIPT" \
+              > audit/build-script-status.txt
+            find kernel_platform -type f \
+              -name 'oplus_build_kernel.sh' -print \
+              > audit/build-script-locations.txt || true
+          fi
+
+          git -C kernel_platform/common log -1 \
+            --format='%H%n%cs%n%s' \
+            > audit/common-kernel-revision.txt
+
+          git -C kernel_platform/msm-kernel log -1 \
+            --format='%H%n%cs%n%s' \
+            > audit/msm-kernel-revision.txt
+
+          {
+            echo '=== kernel_platform/common ==='
+            git -C kernel_platform/common remote -v
+            echo
+            echo '=== kernel_platform/msm-kernel ==='
+            git -C kernel_platform/msm-kernel remote -v
+          } > audit/kernel-remotes.txt
+
+          find . \
+            -path './.repo' -prune -o \
+            -type d -name .git -prune -o \
+            -type f \( -iname '*susfs*' -o -iname '*finasu*' \) -print \
+            > audit/susfs-finasu-files.txt || true
+
+          grep -RniE \
+            'CONFIG_LOCALVERSION|CONFIG_KSU|SUSFS|FINASU' \
+            kernel_platform/common/arch/arm64/configs \
+            kernel_platform/msm-kernel/arch/arm64/configs \
+            --include='*defconfig' \
+            > audit/config-matches.txt 2>/dev/null || true
+
+          {
+            echo '=== Repository manifest ==='
+            cat source-lock.xml
+            echo
+            echo '=== Kernel common revision ==='
+            cat audit/common-kernel-revision.txt
+            echo
+            echo '=== MSM kernel revision ==='
+            cat audit/msm-kernel-revision.txt
+          } > audit/summary.txt
+
+          echo 'Diagnostics collected.'
+
+      - name: Upload kernel diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: oppad2-kernel-diagnostics
+          path: oem/audit/
+          if-no-files-found: warn
           retention-days: 14
           
