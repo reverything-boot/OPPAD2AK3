@@ -37,7 +37,6 @@ jobs:
           set -euo pipefail
           mkdir -p oem
           cd oem
-
           repo init \
             -u https://github.com/OnePlusOSS/kernel_manifest \
             -b oneplus/sm8650 \
@@ -50,10 +49,11 @@ jobs:
           set -euo pipefail
           repo sync -c --no-tags -j2
 
-      - name: Record exact source revisions
+      - name: Record source revisions
         working-directory: oem
         run: |
           set -euo pipefail
+          mkdir -p audit
 
           repo manifest -r -o source-lock.xml
 
@@ -66,21 +66,105 @@ jobs:
           git -C .repo/manifests rev-parse HEAD \
             > manifest-commit.txt
 
-          find kernel_platform -type f \
-            -name 'oplus_build_kernel.sh' -print \
-            > build-script-paths.txt || true
+          git -C kernel_platform/common log -1 \
+            --format='%H%n%cs%n%s' \
+            > audit/common-kernel-revision.txt
 
-          echo "Source revisions recorded."
+          git -C kernel_platform/msm-kernel log -1 \
+            --format='%H%n%cs%n%s' \
+            > audit/msm-kernel-revision.txt
 
-      - name: Save audit files
+          cp source-lock.xml audit/source-lock.xml
+          cp source-commits.txt audit/source-commits.txt
+          cp manifest-commit.txt audit/manifest-commit.txt
+
+      - name: Collect build scripts and configuration inventory
+        working-directory: oem
+        run: |
+          set -euo pipefail
+          mkdir -p audit/scripts audit/inventory
+
+          for src in \
+            kernel_platform/oplus/build/oplus_build_kernel.sh \
+            kernel_platform/oplus/build/oplus_setup.sh \
+            kernel_platform/build/android/prepare_vendor.sh; do
+            if [ -f "$src" ]; then
+              cp --parents "$src" audit/scripts/
+            fi
+          done
+
+          find kernel_platform/oplus \
+            -type f \
+            \( -name 'oplus_setup.sh' \
+               -o -name 'prepare_vendor.sh' \
+               -o -name 'oplus_build_kernel.sh' \) \
+            -print \
+            > audit/inventory/build-script-locations.txt
+
+          {
+            echo '=== Official build entrypoint from manifest README ==='
+            grep -nE 'oplus_build_kernel|pineapple|gki' \
+              .repo/manifests/README.md 2>/dev/null || true
+
+            echo
+            echo '=== Kernel common Makefile version ==='
+            grep -nE \
+              '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION|LOCALVERSION) *=' \
+              kernel_platform/common/Makefile 2>/dev/null || true
+
+            echo
+            echo '=== MSM kernel Makefile version ==='
+            grep -nE \
+              '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION|LOCALVERSION) *=' \
+              kernel_platform/msm-kernel/Makefile 2>/dev/null || true
+          } > audit/inventory/build-and-version-notes.txt
+
+          find kernel_platform/oplus \
+            kernel_platform/common/arch/arm64/configs \
+            kernel_platform/msm-kernel/arch/arm64/configs \
+            -type f \( \
+              -iname '*defconfig*' -o \
+              -iname 'build.config*' -o \
+              -iname '*fragment*.config' -o \
+              -iname '*susfs*' -o \
+              -iname '*finasu*' -o \
+              -iname '*kernelsu*' \
+            \) -print 2>/dev/null \
+            | sort \
+            > audit/inventory/config-and-feature-file-list.txt
+
+          {
+            echo '=== Relevant settings in ARM64 defconfigs ==='
+            grep -RniE \
+              'CONFIG_(LOCALVERSION|KSU|KSU_SUSFS|SUSFS|OVERLAY_FS|KPROBES)|FINASU|SUSFS' \
+              kernel_platform/common/arch/arm64/configs \
+              kernel_platform/msm-kernel/arch/arm64/configs \
+              --include='*defconfig' 2>/dev/null || true
+          } > audit/inventory/defconfig-feature-matches.txt
+
+          {
+            echo '=== Tracked source hits: common kernel ==='
+            git -C kernel_platform/common grep -n -I -E \
+              'SUSFS|FINASU|KernelSU|CONFIG_KSU|KSU_SUSFS|ksu_susfs' \
+              -- '*.c' '*.h' 'Kconfig*' 'Makefile*' \
+                 '*.sh' '*defconfig' '*.config' \
+              2>/dev/null || true
+
+            echo
+            echo '=== Tracked source hits: MSM kernel ==='
+            git -C kernel_platform/msm-kernel grep -n -I -E \
+              'SUSFS|FINASU|KernelSU|CONFIG_KSU|KSU_SUSFS|ksu_susfs' \
+              -- '*.c' '*.h' 'Kconfig*' 'Makefile*' \
+                 '*.sh' '*defconfig' '*.config' \
+              2>/dev/null || true
+          } > audit/inventory/kernel-source-feature-hits.txt
+
+          echo 'Diagnostics collected.'
+
+      - name: Upload audit artifact
         uses: actions/upload-artifact@v4
         with:
-          name: oppad2-oos16-source-audit
-          path: |
-            oem/source-lock.xml
-            oem/source-commits.txt
-            oem/manifest-commit.txt
-            oem/build-script-paths.txt
+          name: oppad2-oem-build-audit
+          path: oem/audit/
           if-no-files-found: error
           retention-days: 14
-          
